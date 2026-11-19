@@ -1,0 +1,37 @@
+<!doctype html>
+<!-- Authors: Rabia Chadha, Claude -->
+<!-- The popup that opens when you click the extension's toolbar icon. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        width: 220px; margin: 0; padding: 16px;
+        background: #fff; color: #111827;
+        font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      }
+      .title { font-size: 15px; font-weight: 600; }
+      .totals { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+      .total { padding: 8px 10px; border-radius: 8px; background: #f3f4f6; }
+      .label { display: block; font-size: 12px; color: #6b7280; }
+      .minutes { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+      .detail { margin-top: 12px; color: #6b7280; }
+      button {
+        width: 100%; margin-top: 12px; padding: 8px 12px;
+        border: none; border-radius: 8px; background: #2563eb; color: #fff;
+        font: inherit; font-weight: 500; cursor: pointer;
+      }
+      button:hover { background: #1d4ed8; }
+    </style>
+  </head>
+  <body>
+    <div class="title">Ed Staff Hours</div>
+    <div class="totals">
+      <div class="total"><span class="label">Today</span><span class="minutes" id="today-total">–</span></div>
+      <div class="total"><span class="label">This week</span><span class="minutes" id="week-total">–</span></div>
+    </div>
+    <div class="detail">Save this week's minutes, Sunday to Saturday, as a text file.</div>
+    <button id="download-week">Download this week</button>
+    <script src="popup.js"></script>
+  </body>
+</html>

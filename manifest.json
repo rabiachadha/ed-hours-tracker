@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Ed Staff Hours",
+  "version": "0.1",
+  "description": "Counts time course staff spend working on Ed and cs61a.org.",
+  "permissions": ["idle", "alarms", "storage"],
+  "host_permissions": ["https://*.edstem.org/*", "https://*.cs61a.org/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    { "matches": ["https://*.edstem.org/*"], "js": ["ed-banner.js"] }
+  ],
+  "action": { "default_popup": "popup.html" }
+}
