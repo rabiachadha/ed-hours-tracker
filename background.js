@@ -6,7 +6,7 @@
 // Each Ed minute is also saved as a typing minute or a reading minute.
 const IDLE_SECONDS = 180; // No keyboard or mouse for 3 minutes means not active
 const MAX_TRIP_MINUTES = 10; // Longer trips are dropped without asking
-const MIN_MINUTES_TO_ASK = 2; // Less time elsewhere than this counts without asking
+const MIN_MINUTES_TO_ASK = 1; // Less time elsewhere than this counts without asking
 const ED_COURSE_ID = "100850"; // CS 61A Fall 2026 on Ed. Change it each semester.
 
 // Chrome can clear alarms when it restarts, so make sure the check exists.
@@ -21,6 +21,21 @@ chrome.tabs.onActivated.addListener(() => runOneAtATime(checkReturnToEd));
 chrome.tabs.onUpdated.addListener(() => runOneAtATime(checkReturnToEd));
 chrome.windows.onFocusChanged.addListener(() => runOneAtATime(checkReturnToEd));
 chrome.idle.onStateChanged.addListener(() => runOneAtATime(checkReturnToEd));
+chrome.runtime.onInstalled.addListener(addBannerScriptToOpenEdTabs);
+
+// Input: installDetails from Chrome; reason is "install", "update" (also when you
+// click reload on chrome://extensions), or "chrome_update".
+// Output: none; adds ed-banner.js to every open Ed tab.
+// Description: Chrome only adds ed-banner.js when a page loads, and reloading the
+// extension cuts off the copies already in open tabs. This saves reloading them.
+async function addBannerScriptToOpenEdTabs(installDetails) {
+  if (installDetails.reason === "chrome_update") return; // Chrome restarted, so tabs already have a fresh copy
+  const edTabs = await chrome.tabs.query({ url: "https://*.edstem.org/*" });
+  for (const edTab of edTabs) {
+    // This fails for tabs Chrome has put to sleep. They get the script when they load again.
+    chrome.scripting.executeScript({ target: { tabId: edTab.id }, files: ["ed-banner.js"] }).catch(() => {});
+  }
+}
 
 let lastQueuedCheck = Promise.resolve(); // The newest check in line; the next one waits for it
 
@@ -34,13 +49,13 @@ function runOneAtATime(check) {
   return checkFinished;
 }
 
-// Input: edPageNote from ed-banner.js, { wasTyping: true } or { countAway: true or false }.
+// Input: edPageNote from ed-banner.js, { wasTyping: true } or { questionId, countAway: true or false }.
 // Output: none.
-// Description: A typing note only marks this minute as a typing minute.
-// It must not reach handleBannerAnswer, which would clear the held minutes.
+// Description: A typing note only marks this minute as a typing minute. Answers
+// wait their turn, so two quick answers can't undo each other's changes.
 function handleEdPageNote(edPageNote) {
   if (edPageNote.wasTyping) return chrome.storage.session.set({ typedThisMinute: true });
-  return handleBannerAnswer(edPageNote);
+  return runOneAtATime(() => handleBannerAnswer(edPageNote));
 }
 
 // Input: none (runs once a minute).
@@ -51,17 +66,20 @@ function handleEdPageNote(edPageNote) {
 async function checkMinute() {
   // Refresh the badge every minute, so it shows 0:00 as soon as a new day starts.
   await showTodayOnBadge();
-  const { place, edTabId } = await currentPlace();
+  const { place, edTabId, edPageLoaded } = await currentPlace();
+  await saveLastCheck(place, edPageLoaded);
   const { trip } = await chrome.storage.session.get("trip");
   // Clear the typing mark every minute so it never carries into the next one.
   const { typedThisMinute } = await chrome.storage.session.get("typedThisMinute");
   await chrome.storage.session.remove("typedThisMinute");
 
   if (place === "ed") {
-    if (trip) await endTrip(trip, edTabId);
+    if (trip) await endTrip(trip);
     await addToDay(typedThisMinute ? "typingMinutesByDay" : "readingMinutesByDay", 1);
     await addMinutes(1);
     await chrome.storage.session.set({ trip: { cs61aMinutes: 0, otherEdMinutes: 0, elsewhereMinutes: 0 } });
+    // ed-banner.js isn't running until the page has loaded. checkReturnToEd shows the banners then.
+    if (edPageLoaded) await showBanners(edTabId);
     return;
   }
 
@@ -74,20 +92,26 @@ async function checkMinute() {
 }
 
 // Input: none (runs when they switch tabs, windows, or pages, or come back from idle).
-// Output: none; ends the trip right away if they're now on CS 61A's Ed.
-// Description: This shows the banner as soon as they're back, instead of at the
+// Output: none; if they're now on CS 61A's Ed, ends the trip and shows unanswered banners.
+// Description: This shows banners as soon as they're back, instead of at the
 // next minute check. It adds no Ed minute; checkMinute still does that.
 async function checkReturnToEd() {
-  const { place, edTabId } = await currentPlace();
+  const { place, edTabId, edPageLoaded } = await currentPlace();
+  await saveLastCheck(place, edPageLoaded);
+  if (place !== "ed") return;
   const { trip } = await chrome.storage.session.get("trip");
-  if (place !== "ed" || !trip) return;
-  await endTrip(trip, edTabId);
-  await chrome.storage.session.set({ trip: { cs61aMinutes: 0, otherEdMinutes: 0, elsewhereMinutes: 0 } });
+  if (trip) {
+    await endTrip(trip);
+    await chrome.storage.session.set({ trip: { cs61aMinutes: 0, otherEdMinutes: 0, elsewhereMinutes: 0 } });
+  }
+  // Banners sent before the page loads are lost, because ed-banner.js isn't running yet.
+  // Chrome fires onUpdated again when the page finishes loading, which runs this again.
+  if (edPageLoaded) await showBanners(edTabId);
 }
 
 // Input: none.
-// Output: { place, edTabId }; place is "ed" (CS 61A's Ed course), "otherEd"
-// (any other Ed page), "cs61a", or "elsewhere".
+// Output: { place, edTabId, edPageLoaded }; place is "ed" (CS 61A's Ed course),
+// "otherEd" (any other Ed page), "cs61a", or "elsewhere".
 // Description: Checks the front tab of the focused Chrome window. Chrome only
 // shows us Ed and cs61a.org addresses, so the rest all count as "elsewhere".
 async function currentPlace() {
@@ -105,11 +129,20 @@ async function currentPlace() {
   const activeTab = chromeWindow.tabs.find((tab) => tab.active);
   const hostname = activeTab?.url ? new URL(activeTab.url).hostname : "";
   if (isSite(hostname, "edstem.org")) {
-    if (isCs61aCourse(activeTab.url)) return { place: "ed", edTabId: activeTab.id };
+    // A tab's status is "complete" once its page has finished loading.
+    const edPageLoaded = activeTab.status === "complete";
+    if (isCs61aCourse(activeTab.url)) return { place: "ed", edTabId: activeTab.id, edPageLoaded };
     return { place: "otherEd" };
   }
   if (isSite(hostname, "cs61a.org")) return { place: "cs61a" };
   return { place: "elsewhere" };
+}
+
+// Input: place and edPageLoaded, from currentPlace.
+// Output: none; saves them with the time, for the popup's debug lines.
+async function saveLastCheck(place, edPageLoaded) {
+  const checkedAt = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" });
+  await chrome.storage.session.set({ lastCheck: { place, edPageLoaded, checkedAt } });
 }
 
 // Input: hostname of a tab, and a domain like "cs61a.org".
@@ -125,33 +158,62 @@ function isCs61aCourse(edUrl) {
   return (new URL(edUrl).pathname + "/").includes(`/courses/${ED_COURSE_ID}/`);
 }
 
-// Input: trip, the time away from Ed that just ended; edTabId, the Ed tab.
-// Output: none; counts the trip's minutes or asks about them.
+// Input: trip, the time away from Ed that just ended.
+// Output: none; counts the trip's minutes or saves a question about them.
 // Description: Trips over 10 minutes are dropped. cs61a.org minutes count right
-// away and other Ed pages never do. A little time elsewhere counts; for more,
-// the Ed tab's banner asks, and handleBannerAnswer gets the reply.
-async function endTrip(trip, edTabId) {
+// away and other Ed pages never do. Time elsewhere becomes a question, which
+// showBanners shows as a banner and handleBannerAnswer answers.
+async function endTrip(trip) {
   const tripMinutes = trip.cs61aMinutes + trip.otherEdMinutes + trip.elsewhereMinutes;
-  if (tripMinutes === 0 || tripMinutes > MAX_TRIP_MINUTES) return;
+  if (tripMinutes === 0) return;
+  if (tripMinutes > MAX_TRIP_MINUTES) return saveLastTrip(trip, `dropped (over ${MAX_TRIP_MINUTES} min)`);
 
   await addMinutes(trip.cs61aMinutes);
   if (trip.elsewhereMinutes < MIN_MINUTES_TO_ASK) {
     await addMinutes(trip.elsewhereMinutes);
-    return;
+    return saveLastTrip(trip, "counted without asking");
   }
-  await chrome.storage.session.set({ minutesToAskAbout: trip.elsewhereMinutes });
-  // An Ed tab opened before the extension was installed has no banner script.
-  chrome.tabs.sendMessage(edTabId, { minutesAway: trip.elsewhereMinutes }).catch(() => {});
+  // Each question gets its own banner. crypto.randomUUID() makes a random id,
+  // like Python's uuid.uuid4(), so an answer can name the question it's for.
+  const { questions = [] } = await chrome.storage.session.get("questions");
+  const endedAt = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  questions.push({ id: crypto.randomUUID(), minutesAway: trip.elsewhereMinutes, endedAt });
+  await chrome.storage.session.set({ questions });
+  await saveLastTrip(trip, "asked");
 }
 
-// Input: edPageNote from the Ed banner, { countAway: true or false }.
-// Output: none; adds the held minutes if they clicked Yes.
-// Description: The minutes come from storage, not the note, and are
-// cleared right away so they can't be counted twice.
+// Input: edTabId, the CS 61A Ed tab in front.
+// Output: none; sends every unanswered question to that tab, which shows one banner each.
+// Description: The tab adds banners for new questions and removes answered ones, so
+// the same unanswered banners follow you across Ed tabs and reloads.
+async function showBanners(edTabId) {
+  const { questions = [] } = await chrome.storage.session.get("questions");
+  try {
+    await chrome.tabs.sendMessage(edTabId, { questions });
+    await chrome.storage.session.remove("bannerError");
+  } catch (error) {
+    // The tab has no banner script yet. The popup's debug lines show the error.
+    await chrome.storage.session.set({ bannerError: error.message });
+  }
+}
+
+// Input: trip, the trip that just ended; outcome, what happened to it, like "asked".
+// Output: none; saves both, with the time, for the popup's debug lines.
+async function saveLastTrip(trip, outcome) {
+  const endedAt = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  await chrome.storage.session.set({ lastTrip: { ...trip, outcome, endedAt } });
+}
+
+// Input: edPageNote from a banner, { questionId, countAway: true or false }.
+// Output: none; adds that question's minutes if they clicked Yes.
+// Description: The minutes come from storage, not the note. The question is
+// removed right away, so a second answer to it (from another tab) does nothing.
 async function handleBannerAnswer(edPageNote) {
-  const { minutesToAskAbout = 0 } = await chrome.storage.session.get("minutesToAskAbout");
-  await chrome.storage.session.remove("minutesToAskAbout");
-  if (edPageNote.countAway) await addMinutes(minutesToAskAbout);
+  const { questions = [] } = await chrome.storage.session.get("questions");
+  const answeredQuestion = questions.find((question) => question.id === edPageNote.questionId);
+  if (!answeredQuestion) return;
+  await chrome.storage.session.set({ questions: questions.filter((question) => question !== answeredQuestion) });
+  if (edPageNote.countAway) await addMinutes(answeredQuestion.minutesAway);
 }
 
 // Input: minutesToAdd, how many minutes to add.

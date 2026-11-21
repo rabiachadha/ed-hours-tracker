@@ -11,7 +11,13 @@ const assert = require("assert");
 const fakeElements = {};
 const fakeDocument = { getElementById: (id) => (fakeElements[id] ??= { addEventListener: () => {} }) };
 const savedTotals = { minutesByDay: {} };
-const fakeChrome = { storage: { local: { get: async (key) => ({ [key]: structuredClone(savedTotals[key]) }) } } };
+const savedTripInfo = {}; // What background.js keeps in chrome.storage.session
+const fakeChrome = {
+  storage: {
+    local: { get: async (key) => ({ [key]: structuredClone(savedTotals[key]) }) },
+    session: { get: async () => structuredClone(savedTripInfo) },
+  },
+};
 const context = vm.createContext({ document: fakeDocument, chrome: fakeChrome, structuredClone });
 vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), context);
 
@@ -71,6 +77,46 @@ const tests = {
     await context.showTotals();
     assert.equal(fakeElements["today-total"].textContent, "1h 23m");
     assert.equal(fakeElements["week-total"].textContent, "1h 23m");
+  },
+  "Debug lines before any trip": async () => {
+    await context.showDebug();
+    assert.equal(
+      fakeElements.debug.textContent,
+      [
+        "Last check: none yet",
+        "Trip now: none (one starts after a minute on CS 61A's Ed)",
+        "Last trip: none yet",
+        "Banners waiting: none",
+      ].join("\n"),
+    );
+  },
+  "Debug lines say when CS 61A's Ed page was still loading": async () => {
+    savedTripInfo.lastCheck = { place: "ed", edPageLoaded: false, checkedAt: "3:46:02 PM" };
+    await context.showDebug();
+    assert.match(fakeElements.debug.textContent, /^Last check \(3:46:02 PM\): CS 61A's Ed, page still loading\n/);
+  },
+  "Debug lines show the trip now, the last trip, the waiting banners, and a send error": async () => {
+    Object.assign(savedTripInfo, {
+      lastCheck: { place: "otherEd", checkedAt: "3:45:10 PM" },
+      trip: { cs61aMinutes: 1, otherEdMinutes: 0, elsewhereMinutes: 2 },
+      lastTrip: { cs61aMinutes: 0, otherEdMinutes: 0, elsewhereMinutes: 6, outcome: "asked", endedAt: "3:42 PM" },
+      questions: [
+        { id: "a1", minutesAway: 3, endedAt: "3:30 PM" },
+        { id: "b2", minutesAway: 6, endedAt: "3:42 PM" },
+      ],
+      bannerError: "Could not establish connection. Receiving end does not exist.",
+    });
+    await context.showDebug();
+    assert.equal(
+      fakeElements.debug.textContent,
+      [
+        "Last check (3:45:10 PM): another Ed page, not CS 61A's course",
+        "Trip now: 2 min elsewhere, 1 cs61a.org, 0 other Ed",
+        "Last trip (3:42 PM): 6 min elsewhere, 0 cs61a.org, 0 other Ed, asked",
+        "Banners waiting: 3 min (3:30 PM), 6 min (3:42 PM)",
+        "Banner send failed: Could not establish connection. Receiving end does not exist.",
+      ].join("\n"),
+    );
   },
 };
 

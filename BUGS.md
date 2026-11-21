@@ -5,7 +5,8 @@ To fix one: write a test in `test-background.js` that fails because of the bug, 
 
 ## 1. An old banner can answer a newer question
 
-- **Status:** Not fixed. Found 2026-11-19 by reading the code, and we decided to fix it later. No test reproduces it yet.
+- **Status:** Fixed 2026-11-21. Found 2026-11-19 by reading the code. The test "Each banner answers only its own question (bug #1)" in `test-background.js` checks the example below.
+- **The fix:** banners now stack, one per time away (Rabia's choice, 2026-11-21). Each question has its own id (`crypto.randomUUID()`), the banner sends that id back with Yes or No, and `handleBannerAnswer` only removes and counts the question with that id. Banners in other tabs are updated to the current list whenever you switch to them.
 - **Where:** `showAwayBanner` in `ed-banner.js` (the click sends only `{ countAway }`, line 77), and `handleBannerAnswer` in `background.js` (lines 108–112).
 - **What goes wrong:** With two Ed tabs open, a banner you ignored earlier can use up the minutes from a newer question.
 - **Example:**
@@ -27,3 +28,14 @@ To fix one: write a test in `test-background.js` that fails because of the bug, 
 - **Why:** The badge only updates when minutes are added. Nothing updates it when the date changes.
 - **Impact:** Only the display is wrong. Saved totals are right, since each day has its own key. It fixes itself at the first counted minute.
 - **Fix idea:** In `checkMinute`, update the badge from today's saved totals every minute, not only when minutes are added. It would then show `0:00` first thing in the morning.
+
+## 3. No banner when coming back to Ed by loading a page
+
+- **Status:** Fixed 2026-11-19. Found 2026-11-19 in real Chrome ("the banner doesn't show anymore"). The tests "Loading an Ed page: the banner waits until the page has loaded (bug #3)" and "Minute check while the Ed page loads doesn't lose the banner (bug #3)" in `test-background.js` failed before the fix (no banner sent) and pass after.
+- **The fix:** `currentPlace` now also returns `edPageLoaded` (the tab's status is `"complete"`). Banners are only sent once the page has loaded. When the page finishes loading, Chrome fires `onUpdated` again, which runs `checkReturnToEd` and shows the banner. (Updated 2026-11-21: since banners stack, unanswered questions are kept in storage and sent again on every check, so the trip no longer has to wait for the page to load. Only the sending does.)
+- **Where:** `checkReturnToEd` and `checkMinute` in `background.js`.
+- **What went wrong:** Coming back to Ed by loading a page showed no banner, and those minutes were never counted.
+- **Example:** After 6 minutes on another site, click a link to Ed, type an Ed address, press Back to Ed, open Ed in a new tab, or switch to an Ed tab Chrome had put to sleep. No banner shows.
+- **Why:** Chrome fires `onUpdated` as soon as the page starts loading. `checkReturnToEd` ended the trip right then and messaged the tab, but `ed-banner.js` only starts once the page has loaded, so nothing received the message. `.catch(() => {})` hid the error. By the time the page loaded, the trip was already gone. This started when the banner was changed to show right away (also 2026-11-19). Before that, trips ended at the minute check, which almost always came after the page had loaded.
+- **Impact:** Minutes away were dropped without asking. Switching to an Ed tab that was already loaded still worked.
+- **Related, also fixed 2026-11-19:** after reloading the extension, Ed tabs that were already open couldn't get banners until you reloaded them (the popup's debug line showed "banner failed: Could not establish connection. Receiving end does not exist."). Now `addBannerScriptToOpenEdTabs` adds `ed-banner.js` back to open Ed tabs on install or reload. This needed the `scripting` permission, which Rabia approved. Tested by "Installing or reloading the extension adds the banner script to open Ed tabs".

@@ -5,16 +5,19 @@
 const fs = require("fs");
 const vm = require("vm");
 const assert = require("assert");
+const crypto = require("crypto");
 
 const backgroundSource = fs.readFileSync(process.argv[2], "utf8");
 
 // Input: none.
 // Output: { context, fakeBrowser } — a fresh copy of background.js to drive.
 // Description: fakeBrowser holds what the fake Chrome reports (where the
-// person is), records what the extension did (banners sent), and keeps the
+// person is), records what the extension did (banners showing), and keeps the
 // listeners background.js adds to Chrome events, so tests can fire them.
 function loadExtension() {
-  const fakeBrowser = { place: "ed", focused: true, idleState: "active", bannersSent: [], windowsOpen: true };
+  const fakeBrowser = {
+    place: "ed", focused: true, idleState: "active", bannersShowing: [], windowsOpen: true, edPageLoading: false, scriptsAdded: [],
+  };
   // A fake Chrome event. It saves background.js's listener on fakeBrowser under listenerName.
   const fakeChromeEvent = (listenerName) => ({ addListener: (listener) => (fakeBrowser[listenerName] = listener) });
   const makeStorage = () => {
@@ -36,18 +39,30 @@ function loadExtension() {
   };
   const chrome = {
     alarms: { get: async () => undefined, create: () => {}, onAlarm: fakeChromeEvent("onAlarm") },
-    runtime: { onMessage: { addListener: (handleEdPageNote) => (fakeBrowser.handleEdPageNote = handleEdPageNote) } },
+    runtime: {
+      onMessage: { addListener: (handleEdPageNote) => (fakeBrowser.handleEdPageNote = handleEdPageNote) },
+      onInstalled: fakeChromeEvent("onInstalled"),
+    },
+    // Two Ed tabs are open. Only a query for Ed pages finds them.
+    scripting: { executeScript: async (injection) => fakeBrowser.scriptsAdded.push(injection) },
     storage: { session: makeStorage(), local: makeStorage() },
     idle: { queryState: async () => fakeBrowser.idleState, onStateChanged: fakeChromeEvent("onIdleStateChanged") },
     windows: {
       getLastFocused: async () => {
         if (!fakeBrowser.windowsOpen) throw new Error("No last-focused window");
-        return { focused: fakeBrowser.focused, tabs: [{ id: 7, active: true, url: urlByPlace[fakeBrowser.place] }] };
+        const status = fakeBrowser.edPageLoading ? "loading" : "complete";
+        return { focused: fakeBrowser.focused, tabs: [{ id: 7, active: true, url: urlByPlace[fakeBrowser.place], status }] };
       },
       onFocusChanged: fakeChromeEvent("onWindowFocusChanged"),
     },
     tabs: {
-      sendMessage: async (tabId, minutesAwayNote) => fakeBrowser.bannersSent.push({ tabId, ...minutesAwayNote }),
+      query: async (queryInfo) => (queryInfo.url === "https://*.edstem.org/*" ? [{ id: 7 }, { id: 8 }] : []),
+      sendMessage: async (tabId, bannerNote) => {
+        // Like real Chrome: while the page loads, ed-banner.js isn't running yet, so the message fails.
+        if (fakeBrowser.edPageLoading) throw new Error("Could not establish connection. Receiving end does not exist.");
+        if (tabId !== 7) throw new Error(`No tab with id ${tabId}`);
+        fakeBrowser.bannersShowing = bannerNote.questions; // ed-banner.js shows one banner per question
+      },
       onActivated: fakeChromeEvent("onTabActivated"),
       onUpdated: fakeChromeEvent("onTabUpdated"),
     },
@@ -56,14 +71,14 @@ function loadExtension() {
       setTitle: (hoverText) => (fakeBrowser.hoverText = hoverText.title),
     },
   };
-  const context = vm.createContext({ chrome, URL, structuredClone });
+  const context = vm.createContext({ chrome, URL, structuredClone, crypto });
   vm.runInContext(backgroundSource, context);
   return { context, fakeBrowser, chrome };
 }
 
 // Input: steps like [["ed", 5], ["elsewhere", 3]]; minuteSituation can also be "idle",
 // "unfocused", "nowindows", or "typing" (on Ed and typed that minute).
-// Output: { getTodayMinutes, bannersSent, clickBannerButton } after running every minute.
+// Output: { getTodayMinutes, minutesShowing, clickBannerButton, getLastTrip, getLastCheck } after running every minute.
 async function simulate(steps) {
   const { context, fakeBrowser, chrome } = loadExtension();
   for (const [minuteSituation, minutes] of steps) {
@@ -78,8 +93,17 @@ async function simulate(steps) {
   }
   const getTodayMinutes = (storageKey = "minutesByDay") =>
     Object.values(chrome.storage.local.savedItems[storageKey] || {})[0] || 0;
-  const clickBannerButton = async (countAway) => fakeBrowser.handleEdPageNote({ countAway });
-  return { getTodayMinutes, bannersSent: fakeBrowser.bannersSent, clickBannerButton, fakeBrowser };
+  // The minutes on each banner the Ed tab is showing, oldest first, like [5, 1].
+  const minutesShowing = () => fakeBrowser.bannersShowing.map((question) => question.minutesAway);
+  // Clicks Yes (true) or No (false) on one banner and removes it, like ed-banner.js does.
+  const clickBannerButton = async (countAway, bannerIndex = 0) => {
+    const question = fakeBrowser.bannersShowing[bannerIndex];
+    fakeBrowser.bannersShowing = fakeBrowser.bannersShowing.filter((shown) => shown !== question);
+    return fakeBrowser.handleEdPageNote({ questionId: question.id, countAway });
+  };
+  const getLastTrip = () => chrome.storage.session.savedItems.lastTrip;
+  const getLastCheck = () => chrome.storage.session.savedItems.lastCheck;
+  return { getTodayMinutes, minutesShowing, clickBannerButton, getLastTrip, getLastCheck, fakeBrowser };
 }
 
 // What Chrome passes to each listener. background.js should work no matter what's passed.
@@ -89,6 +113,7 @@ const chromeEventArgs = {
   onTabUpdated: [7, { status: "complete" }, { id: 7, active: true }],
   onWindowFocusChanged: [1],
   onIdleStateChanged: ["active"],
+  onInstalled: [{ reason: "update" }], // "update" is also what clicking reload (↻) sends
 };
 
 // Input: fakeBrowser; listenerName, like "onTabActivated".
@@ -127,7 +152,7 @@ const tests = {
   "cs61a.org trip counts automatically, no banner": async () => {
     const simulationResult = await simulate([["ed", 5], ["cs61a", 5], ["ed", 1]]);
     assert.equal(simulationResult.getTodayMinutes(), 11);
-    assert.equal(simulationResult.bannersSent.length, 0);
+    assert.deepEqual(simulationResult.minutesShowing(), []);
   },
   "code.cs61a.org counts as cs61a": async () => {
     const simulationResult = await simulate([["ed", 1], ["code", 3], ["ed", 1]]);
@@ -136,10 +161,12 @@ const tests = {
   "Other site 5 min: banner asks, Yes counts it once": async () => {
     const simulationResult = await simulate([["ed", 5], ["cs61a", 5], ["elsewhere", 5], ["ed", 1]]);
     assert.equal(simulationResult.getTodayMinutes(), 11);
-    assert.deepEqual(simulationResult.bannersSent, [{ tabId: 7, minutesAway: 5 }]);
+    assert.deepEqual(simulationResult.minutesShowing(), [5]);
+    const [question] = simulationResult.fakeBrowser.bannersShowing;
     await simulationResult.clickBannerButton(true);
     assert.equal(simulationResult.getTodayMinutes(), 16);
-    await simulationResult.clickBannerButton(true); // A second click must not count it again
+    // The same answer again, like a click on an old copy of this banner in another tab, must not count twice.
+    await simulationResult.fakeBrowser.handleEdPageNote({ questionId: question.id, countAway: true });
     assert.equal(simulationResult.getTodayMinutes(), 16);
   },
   "Other site: No drops it": async () => {
@@ -147,19 +174,16 @@ const tests = {
     await simulationResult.clickBannerButton(false);
     assert.equal(simulationResult.getTodayMinutes(), 3);
   },
-  "Under 2 min elsewhere counts without asking": async () => {
+  "Even 1 min elsewhere asks": async () => {
     const simulationResult = await simulate([["ed", 1], ["elsewhere", 1], ["ed", 1]]);
+    assert.deepEqual(simulationResult.minutesShowing(), [1]);
+    await simulationResult.clickBannerButton(true);
     assert.equal(simulationResult.getTodayMinutes(), 3);
-    assert.equal(simulationResult.bannersSent.length, 0);
   },
-  "Exactly 2 min elsewhere asks": async () => {
-    const simulationResult = await simulate([["ed", 1], ["elsewhere", 2], ["ed", 1]]);
-    assert.deepEqual(simulationResult.bannersSent, [{ tabId: 7, minutesAway: 2 }]);
-  },
-  "Two 1 min trips in a row: no banners, both count": async () => {
+  "Two 1 min trips in a row: each one asks": async () => {
     const simulationResult = await simulate([["ed", 5], ["elsewhere", 1], ["ed", 1], ["elsewhere", 1], ["ed", 1]]);
-    assert.equal(simulationResult.getTodayMinutes(), 9);
-    assert.equal(simulationResult.bannersSent.length, 0);
+    assert.deepEqual(simulationResult.minutesShowing(), [1, 1]);
+    assert.equal(simulationResult.getTodayMinutes(), 7); // Time elsewhere waits for an answer
   },
   "Exactly 10 min trip still counts": async () => {
     const simulationResult = await simulate([["ed", 1], ["cs61a", 10], ["ed", 1]]);
@@ -168,7 +192,7 @@ const tests = {
   "11 min trip is dropped, no banner": async () => {
     const simulationResult = await simulate([["ed", 1], ["cs61a", 6], ["elsewhere", 5], ["ed", 1]]);
     assert.equal(simulationResult.getTodayMinutes(), 2);
-    assert.equal(simulationResult.bannersSent.length, 0);
+    assert.deepEqual(simulationResult.minutesShowing(), []);
   },
   "Trip that never returns to Ed doesn't count": async () => {
     const simulationResult = await simulate([["ed", 2], ["cs61a", 5]]);
@@ -181,15 +205,15 @@ const tests = {
   "Idle on Ed is treated as away and asked about": async () => {
     const simulationResult = await simulate([["ed", 2], ["idle", 5], ["ed", 1]]);
     assert.equal(simulationResult.getTodayMinutes(), 3);
-    assert.deepEqual(simulationResult.bannersSent, [{ tabId: 7, minutesAway: 5 }]);
+    assert.deepEqual(simulationResult.minutesShowing(), [5]);
   },
   "Another app in front (Chrome not focused) is away": async () => {
     const simulationResult = await simulate([["ed", 1], ["unfocused", 5], ["ed", 1]]);
-    assert.equal(simulationResult.bannersSent[0].minutesAway, 5);
+    assert.deepEqual(simulationResult.minutesShowing(), [5]);
   },
   "No Chrome windows open doesn't crash": async () => {
     const simulationResult = await simulate([["ed", 1], ["nowindows", 5], ["ed", 1]]);
-    assert.equal(simulationResult.bannersSent[0].minutesAway, 5);
+    assert.deepEqual(simulationResult.minutesShowing(), [5]);
   },
   "Ed minutes split into typing and reading; trips are neither": async () => {
     const simulationResult = await simulate([["ed", 2], ["typing", 3], ["cs61a", 2], ["ed", 1]]);
@@ -205,7 +229,7 @@ const tests = {
   "Another Ed course never counts, even briefly": async () => {
     const simulationResult = await simulate([["ed", 2], ["otherCourse", 3], ["ed", 1]]);
     assert.equal(simulationResult.getTodayMinutes(), 3);
-    assert.equal(simulationResult.bannersSent.length, 0);
+    assert.deepEqual(simulationResult.minutesShowing(), []);
   },
   "Ed dashboard never counts, even before CS 61A Ed": async () => {
     const simulationResult = await simulate([["edDashboard", 3], ["ed", 1], ["edDashboard", 2], ["ed", 1]]);
@@ -213,35 +237,35 @@ const tests = {
   },
   "Banner asks only about the non-Ed minutes": async () => {
     const simulationResult = await simulate([["ed", 1], ["otherCourse", 3], ["elsewhere", 5], ["ed", 1]]);
-    assert.deepEqual(simulationResult.bannersSent, [{ tabId: 7, minutesAway: 5 }]);
+    assert.deepEqual(simulationResult.minutesShowing(), [5]);
   },
   "Other Ed minutes still count toward the 10 min limit": async () => {
     const simulationResult = await simulate([["ed", 1], ["otherCourse", 8], ["elsewhere", 3], ["ed", 1]]);
     assert.equal(simulationResult.getTodayMinutes(), 2);
-    assert.equal(simulationResult.bannersSent.length, 0);
+    assert.deepEqual(simulationResult.minutesShowing(), []);
   },
-  "Switching back after a short trip counts it right away, no banner": async () => {
-    const simulationResult = await simulate([["ed", 1], ["elsewhere", 1]]);
+  "Switching back after a cs61a.org trip counts it right away, no banner": async () => {
+    const simulationResult = await simulate([["ed", 1], ["cs61a", 1]]);
     putBackOnEd(simulationResult.fakeBrowser);
     await fireChromeEvent(simulationResult.fakeBrowser, "onTabActivated");
     assert.equal(simulationResult.getTodayMinutes(), 2);
-    assert.equal(simulationResult.bannersSent.length, 0);
+    assert.deepEqual(simulationResult.minutesShowing(), []);
   },
   "Switching to another Ed course doesn't end the trip": async () => {
     const simulationResult = await simulate([["ed", 1], ["elsewhere", 6]]);
     simulationResult.fakeBrowser.place = "otherCourse";
     await fireChromeEvent(simulationResult.fakeBrowser, "onTabActivated");
-    assert.equal(simulationResult.bannersSent.length, 0);
+    assert.deepEqual(simulationResult.minutesShowing(), []);
     putBackOnEd(simulationResult.fakeBrowser);
     await fireChromeEvent(simulationResult.fakeBrowser, "onTabActivated");
-    assert.deepEqual(simulationResult.bannersSent, [{ tabId: 7, minutesAway: 6 }]);
+    assert.deepEqual(simulationResult.minutesShowing(), [6]);
   },
   "Switching to Ed before ever being on Ed does nothing": async () => {
     const simulationResult = await simulate([["cs61a", 3]]);
     putBackOnEd(simulationResult.fakeBrowser);
     await fireChromeEvent(simulationResult.fakeBrowser, "onTabActivated");
     assert.equal(simulationResult.getTodayMinutes(), 0);
-    assert.equal(simulationResult.bannersSent.length, 0);
+    assert.deepEqual(simulationResult.minutesShowing(), []);
   },
   "Switch events and the minute check firing together count the trip once": async () => {
     const simulationResult = await simulate([["ed", 1], ["cs61a", 3], ["elsewhere", 5]]);
@@ -252,7 +276,7 @@ const tests = {
       fireChromeEvent(simulationResult.fakeBrowser, "onTabUpdated"),
       fireChromeEvent(simulationResult.fakeBrowser, "onAlarm"),
     ]);
-    assert.equal(simulationResult.bannersSent.length, 1);
+    assert.deepEqual(simulationResult.minutesShowing(), [5]);
     assert.equal(simulationResult.getTodayMinutes(), 5); // 1 Ed + 3 cs61a + 1 Ed
   },
   "A quick look at Ed ends the trip": async () => {
@@ -265,7 +289,103 @@ const tests = {
     for (let i = 0; i < 10; i++) await fireChromeEvent(fakeBrowser, "onAlarm");
     putBackOnEd(fakeBrowser);
     await fireChromeEvent(fakeBrowser, "onTabActivated");
-    assert.deepEqual(simulationResult.bannersSent, [{ tabId: 7, minutesAway: 10 }, { tabId: 7, minutesAway: 10 }]);
+    assert.deepEqual(simulationResult.minutesShowing(), [10, 10]);
+  },
+  "Each banner answers only its own question (bug #1)": async () => {
+    // Two absences, both unanswered: 7 minutes, then 6 minutes.
+    const simulationResult = await simulate([["ed", 1], ["elsewhere", 7], ["ed", 1], ["elsewhere", 6], ["ed", 1]]);
+    assert.deepEqual(simulationResult.minutesShowing(), [7, 6]);
+    await simulationResult.clickBannerButton(false, 0); // No on the 7-minute banner
+    assert.deepEqual(simulationResult.minutesShowing(), [6]);
+    await simulationResult.clickBannerButton(true, 0); // Yes on the 6-minute banner
+    assert.equal(simulationResult.getTodayMinutes(), 9); // 3 Ed + 6
+  },
+  "Answering two banners at once counts both and clears both": async () => {
+    const simulationResult = await simulate([["ed", 1], ["elsewhere", 2], ["ed", 1], ["elsewhere", 3], ["ed", 1]]);
+    const { fakeBrowser } = simulationResult;
+    const [firstQuestion, secondQuestion] = fakeBrowser.bannersShowing;
+    await Promise.all([
+      fakeBrowser.handleEdPageNote({ questionId: firstQuestion.id, countAway: true }),
+      fakeBrowser.handleEdPageNote({ questionId: secondQuestion.id, countAway: true }),
+    ]);
+    assert.equal(simulationResult.getTodayMinutes(), 8); // 3 Ed + 2 + 3
+    await fireChromeEvent(fakeBrowser, "onTabActivated");
+    assert.deepEqual(simulationResult.minutesShowing(), []);
+  },
+  "An unanswered banner comes back after a reload or switching Ed tabs": async () => {
+    const simulationResult = await simulate([["ed", 1], ["elsewhere", 3], ["ed", 1]]);
+    const { fakeBrowser } = simulationResult;
+    fakeBrowser.bannersShowing = []; // Reloading the Ed page clears what it showed
+    await fireChromeEvent(fakeBrowser, "onTabUpdated");
+    assert.deepEqual(simulationResult.minutesShowing(), [3]);
+    fakeBrowser.bannersShowing = []; // Another Ed tab, which isn't showing it yet
+    await fireChromeEvent(fakeBrowser, "onTabActivated");
+    assert.deepEqual(simulationResult.minutesShowing(), [3]);
+  },
+  "An answered banner is removed from the next Ed tab you look at": async () => {
+    const simulationResult = await simulate([["ed", 1], ["elsewhere", 3], ["ed", 1]]);
+    const { fakeBrowser } = simulationResult;
+    const otherTabBanners = fakeBrowser.bannersShowing; // Another Ed tab shows the same banner
+    await simulationResult.clickBannerButton(true);
+    fakeBrowser.bannersShowing = otherTabBanners; // Switch to that tab
+    await fireChromeEvent(fakeBrowser, "onTabActivated");
+    assert.deepEqual(simulationResult.minutesShowing(), []);
+  },
+  "Installing or reloading the extension adds the banner script to open Ed tabs": async () => {
+    const { fakeBrowser } = loadExtension();
+    await fireChromeEvent(fakeBrowser, "onInstalled");
+    assert.deepEqual(fakeBrowser.scriptsAdded, [
+      { target: { tabId: 7 }, files: ["ed-banner.js"] },
+      { target: { tabId: 8 }, files: ["ed-banner.js"] },
+    ]);
+  },
+  "A Chrome update doesn't add the banner script again": async () => {
+    const { fakeBrowser } = loadExtension();
+    await fireChromeEvent(fakeBrowser, "onInstalled"); // Makes sure background.js listens for it
+    fakeBrowser.scriptsAdded = [];
+    await fakeBrowser.onInstalled({ reason: "chrome_update" });
+    assert.deepEqual(fakeBrowser.scriptsAdded, []);
+  },
+  "Each ended trip is saved with what happened, for the popup's debug lines": async () => {
+    const askedResult = await simulate([["ed", 1], ["elsewhere", 3], ["ed", 1]]);
+    assert.equal(askedResult.getLastTrip().elsewhereMinutes, 3);
+    assert.equal(askedResult.getLastTrip().outcome, "asked");
+    const countedResult = await simulate([["ed", 1], ["cs61a", 1], ["ed", 1]]);
+    assert.equal(countedResult.getLastTrip().outcome, "counted without asking");
+    const droppedResult = await simulate([["ed", 1], ["elsewhere", 11], ["ed", 1]]);
+    assert.equal(droppedResult.getLastTrip().outcome, "dropped (over 10 min)");
+  },
+  "Minute checks and switches save where they saw you, for the popup's debug lines": async () => {
+    const simulationResult = await simulate([["ed", 1], ["otherCourse", 1]]);
+    assert.equal(simulationResult.getLastCheck().place, "otherEd");
+    putBackOnEd(simulationResult.fakeBrowser);
+    simulationResult.fakeBrowser.edPageLoading = true;
+    await fireChromeEvent(simulationResult.fakeBrowser, "onTabActivated");
+    assert.equal(simulationResult.getLastCheck().place, "ed");
+    assert.equal(simulationResult.getLastCheck().edPageLoaded, false);
+  },
+  "Loading an Ed page: the banner waits until the page has loaded (bug #3)": async () => {
+    const simulationResult = await simulate([["ed", 1], ["elsewhere", 6]]);
+    const { fakeBrowser } = simulationResult;
+    putBackOnEd(fakeBrowser);
+    // Chrome fires onUpdated when the page starts loading, and again when it's done.
+    fakeBrowser.edPageLoading = true;
+    await fireChromeEvent(fakeBrowser, "onTabUpdated");
+    fakeBrowser.edPageLoading = false;
+    await fireChromeEvent(fakeBrowser, "onTabUpdated");
+    assert.deepEqual(simulationResult.minutesShowing(), [6]);
+  },
+  "Minute check while the Ed page loads doesn't lose the banner (bug #3)": async () => {
+    const simulationResult = await simulate([["ed", 1], ["elsewhere", 6]]);
+    const { fakeBrowser } = simulationResult;
+    putBackOnEd(fakeBrowser);
+    fakeBrowser.edPageLoading = true;
+    await fireChromeEvent(fakeBrowser, "onAlarm");
+    fakeBrowser.edPageLoading = false;
+    await fireChromeEvent(fakeBrowser, "onTabUpdated");
+    assert.deepEqual(simulationResult.minutesShowing(), [6]);
+    await simulationResult.clickBannerButton(true);
+    assert.equal(simulationResult.getTodayMinutes(), 8); // 1 Ed + 1 Ed while loading + 6 away
   },
 };
 
@@ -282,9 +402,9 @@ for (const [wayBack, listenerName, awaySituation] of waysBackToEd) {
     const simulationResult = await simulate([["ed", 1], [awaySituation, 6]]);
     putBackOnEd(simulationResult.fakeBrowser);
     await fireChromeEvent(simulationResult.fakeBrowser, listenerName);
-    assert.deepEqual(simulationResult.bannersSent, [{ tabId: 7, minutesAway: 6 }]);
+    assert.deepEqual(simulationResult.minutesShowing(), [6]);
     await fireChromeEvent(simulationResult.fakeBrowser, "onAlarm");
-    assert.equal(simulationResult.bannersSent.length, 1);
+    assert.deepEqual(simulationResult.minutesShowing(), [6]); // Still one banner, not two
     await simulationResult.clickBannerButton(true);
     assert.equal(simulationResult.getTodayMinutes(), 8); // 1 Ed + 6 away + 1 Ed
   };

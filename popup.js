@@ -5,6 +5,7 @@
 // Sunday to Saturday, as a .txt file.
 document.getElementById("download-week").addEventListener("click", downloadWeek);
 showTotals();
+showDebug();
 
 // Input: none (runs each time the popup opens).
 // Output: none; fills in the "Today" and "This week" totals above the button.
@@ -17,6 +18,48 @@ async function showTotals() {
   const { weekMinutes } = buildWeekText(today, minutesByDay);
   document.getElementById("today-total").textContent = formatHours(todayMinutes);
   document.getElementById("week-total").textContent = formatHours(weekMinutes);
+}
+
+// Input: none (runs each time the popup opens).
+// Output: none; fills in the debug lines under the button.
+// Description: Shows where the last check saw you, the current trip, the last trip
+// and what happened to it, the unanswered banners, and why sending them failed, if it did.
+async function showDebug() {
+  const { lastCheck, trip, lastTrip, questions = [], bannerError } = await chrome.storage.session.get(
+    ["lastCheck", "trip", "lastTrip", "questions", "bannerError"],
+  );
+  const waitingBanners = questions.map((question) => `${question.minutesAway} min (${question.endedAt})`);
+  const debugLines = [
+    lastCheck ? describeCheck(lastCheck) : "Last check: none yet",
+    trip ? `Trip now: ${describeTrip(trip)}` : "Trip now: none (one starts after a minute on CS 61A's Ed)",
+    lastTrip ? `Last trip (${lastTrip.endedAt}): ${describeTrip(lastTrip)}, ${lastTrip.outcome}` : "Last trip: none yet",
+    `Banners waiting: ${waitingBanners.join(", ") || "none"}`,
+  ];
+  if (bannerError) debugLines.push(`Banner send failed: ${bannerError}`);
+  document.getElementById("debug").textContent = debugLines.join("\n");
+}
+
+// What each place from background.js's currentPlace means.
+const PLACE_NAMES = {
+  ed: "CS 61A's Ed",
+  otherEd: "another Ed page, not CS 61A's course",
+  cs61a: "cs61a.org",
+  elsewhere: "elsewhere (another site or app, idle, or DevTools in front)",
+};
+
+// Input: lastCheck, like { place: "ed", edPageLoaded: true, checkedAt: "3:45:10 PM" }.
+// Output: text like "Last check (3:45:10 PM): CS 61A's Ed".
+// Description: edPageLoaded is only saved for CS 61A's Ed, so it's false only
+// when that page was still loading.
+function describeCheck(lastCheck) {
+  const loadingNote = lastCheck.edPageLoaded === false ? ", page still loading" : "";
+  return `Last check (${lastCheck.checkedAt}): ${PLACE_NAMES[lastCheck.place]}${loadingNote}`;
+}
+
+// Input: trip, like { cs61aMinutes: 1, otherEdMinutes: 0, elsewhereMinutes: 2 }.
+// Output: text like "2 min elsewhere, 1 cs61a.org, 0 other Ed".
+function describeTrip(trip) {
+  return `${trip.elsewhereMinutes} min elsewhere, ${trip.cs61aMinutes} cs61a.org, ${trip.otherEdMinutes} other Ed`;
 }
 
 // Input: none (runs when the button is clicked).
