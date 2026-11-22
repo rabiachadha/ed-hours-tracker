@@ -58,6 +58,9 @@ function handleEdPageNote(edPageNote) {
   return runOneAtATime(() => handleBannerAnswer(edPageNote));
 }
 
+// A trip with no minutes away yet. Storage saves a copy, so every trip gets its own.
+const EMPTY_TRIP = { cs61aMinutes: 0, otherEdMinutes: 0, elsewhereMinutes: 0 };
+
 // Input: none (runs once a minute).
 // Output: none; updates today's totals and the current trip.
 // Description: Each Ed minute counts as typing or reading and starts a fresh,
@@ -68,18 +71,15 @@ async function checkMinute() {
   await showTodayOnBadge();
   const { place, edTabId, edPageLoaded } = await currentPlace();
   await saveLastCheck(place, edPageLoaded);
-  const { trip } = await chrome.storage.session.get("trip");
   // Clear the typing mark every minute so it never carries into the next one.
-  const { typedThisMinute } = await chrome.storage.session.get("typedThisMinute");
+  const { trip, typedThisMinute } = await chrome.storage.session.get(["trip", "typedThisMinute"]);
   await chrome.storage.session.remove("typedThisMinute");
 
   if (place === "ed") {
-    if (trip) await endTrip(trip);
+    await endTripAndShowBanners(trip, edTabId, edPageLoaded);
+    if (!trip) await chrome.storage.session.set({ trip: EMPTY_TRIP }); // The first Ed minute starts a trip
     await addToDay(typedThisMinute ? "typingMinutesByDay" : "readingMinutesByDay", 1);
     await addMinutes(1);
-    await chrome.storage.session.set({ trip: { cs61aMinutes: 0, otherEdMinutes: 0, elsewhereMinutes: 0 } });
-    // ed-banner.js isn't running until the page has loaded. checkReturnToEd shows the banners then.
-    if (edPageLoaded) await showBanners(edTabId);
     return;
   }
 
@@ -100,12 +100,19 @@ async function checkReturnToEd() {
   await saveLastCheck(place, edPageLoaded);
   if (place !== "ed") return;
   const { trip } = await chrome.storage.session.get("trip");
+  await endTripAndShowBanners(trip, edTabId, edPageLoaded);
+}
+
+// Input: trip (undefined before their first Ed minute), edTabId, edPageLoaded.
+// Output: none; ends the trip, starts an empty one, and sends banners to the tab.
+// Description: checkMinute and checkReturnToEd both run this on CS 61A's Ed.
+// Banners wait for the page to load, since ed-banner.js isn't running before
+// then. Chrome fires onUpdated when the page finishes, which runs this again.
+async function endTripAndShowBanners(trip, edTabId, edPageLoaded) {
   if (trip) {
     await endTrip(trip);
-    await chrome.storage.session.set({ trip: { cs61aMinutes: 0, otherEdMinutes: 0, elsewhereMinutes: 0 } });
+    await chrome.storage.session.set({ trip: EMPTY_TRIP });
   }
-  // Banners sent before the page loads are lost, because ed-banner.js isn't running yet.
-  // Chrome fires onUpdated again when the page finishes loading, which runs this again.
   if (edPageLoaded) await showBanners(edTabId);
 }
 
@@ -176,8 +183,7 @@ async function endTrip(trip) {
   // Each question gets its own banner. crypto.randomUUID() makes a random id,
   // like Python's uuid.uuid4(), so an answer can name the question it's for.
   const { questions = [] } = await chrome.storage.session.get("questions");
-  const endedAt = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-  questions.push({ id: crypto.randomUUID(), minutesAway: trip.elsewhereMinutes, endedAt });
+  questions.push({ id: crypto.randomUUID(), minutesAway: trip.elsewhereMinutes, endedAt: clockTime() });
   await chrome.storage.session.set({ questions });
   await saveLastTrip(trip, "asked");
 }
@@ -200,8 +206,7 @@ async function showBanners(edTabId) {
 // Input: trip, the trip that just ended; outcome, what happened to it, like "asked".
 // Output: none; saves both, with the time, for the popup's debug lines.
 async function saveLastTrip(trip, outcome) {
-  const endedAt = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-  await chrome.storage.session.set({ lastTrip: { ...trip, outcome, endedAt } });
+  await chrome.storage.session.set({ lastTrip: { ...trip, outcome, endedAt: clockTime() } });
 }
 
 // Input: edPageNote from a banner, { questionId, countAway: true or false }.
@@ -229,7 +234,7 @@ async function addMinutes(minutesToAdd) {
 // Description: Each key holds totals by date, like "2026-11-18", in
 // chrome.storage.local, so they survive restarts.
 async function addToDay(storageKey, minutesToAdd) {
-  const today = new Date().toLocaleDateString("en-CA");
+  const today = todayKey();
   const { [storageKey]: totalMinByDay = {} } = await chrome.storage.local.get(storageKey);
   totalMinByDay[today] = (totalMinByDay[today] || 0) + minutesToAdd;
   await chrome.storage.local.set({ [storageKey]: totalMinByDay });
@@ -241,10 +246,10 @@ async function addToDay(storageKey, minutesToAdd) {
 // Description: Looks up today's date each time, so on a new day it finds no
 // saved minutes yet and shows 0:00 instead of yesterday's total.
 async function showTodayOnBadge() {
-  const today = new Date().toLocaleDateString("en-CA");
-  const { minutesByDay = {} } = await chrome.storage.local.get("minutesByDay");
-  const { typingMinutesByDay = {} } = await chrome.storage.local.get("typingMinutesByDay");
-  const { readingMinutesByDay = {} } = await chrome.storage.local.get("readingMinutesByDay");
+  const today = todayKey();
+  const { minutesByDay = {}, typingMinutesByDay = {}, readingMinutesByDay = {} } = await chrome.storage.local.get(
+    ["minutesByDay", "typingMinutesByDay", "readingMinutesByDay"],
+  );
   const todayMinutes = minutesByDay[today] || 0;
   const typingMinutes = typingMinutesByDay[today] || 0;
   const readingMinutes = readingMinutesByDay[today] || 0;
@@ -255,4 +260,17 @@ async function showTodayOnBadge() {
   chrome.action.setTitle({
     title: `Ed time today: ${hours}h ${leftoverMinutes}m (typing ${typingMinutes} min, reading ${readingMinutes} min)`,
   });
+}
+
+// Input: none.
+// Output: today's date as a storage key, like "2026-11-18".
+// Description: "en-CA" is Canada's date style, which writes year-month-day.
+function todayKey() {
+  return new Date().toLocaleDateString("en-CA");
+}
+
+// Input: none.
+// Output: the time now, like "3:42 PM", for banners and the popup's debug lines.
+function clockTime() {
+  return new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }

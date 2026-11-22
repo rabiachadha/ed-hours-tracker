@@ -8,16 +8,25 @@ showTotals();
 showDebug();
 
 // Input: none (runs each time the popup opens).
-// Output: none; fills in the "Today" and "This week" totals above the button.
+// Output: none; fills in the "Today" and "This week" totals above the button,
+// and today's typing and reading time on Ed under the "Today" total.
 // Description: The week total comes from buildWeekText, so it always matches
 // the "Week total" line in the downloaded file.
 async function showTotals() {
-  const { minutesByDay = {} } = await chrome.storage.local.get("minutesByDay");
+  const { minutesByDay = {}, typingMinutesByDay = {}, readingMinutesByDay = {} } = await chrome.storage.local.get(
+    ["minutesByDay", "typingMinutesByDay", "readingMinutesByDay"],
+  );
   const today = new Date();
-  const todayMinutes = minutesByDay[today.toLocaleDateString("en-CA")] || 0;
+  const todayDateKey = today.toLocaleDateString("en-CA");
+  const todayMinutes = minutesByDay[todayDateKey] || 0;
+  const typingMinutes = typingMinutesByDay[todayDateKey] || 0;
+  const readingMinutes = readingMinutesByDay[todayDateKey] || 0;
   const { weekMinutes } = buildWeekText(today, minutesByDay);
   document.getElementById("today-total").textContent = formatHours(todayMinutes);
   document.getElementById("week-total").textContent = formatHours(weekMinutes);
+  // "\n" starts a new line, because popup.html styles this with white-space: pre-line.
+  document.getElementById("today-typing-reading").textContent =
+    `Typing ${formatHours(typingMinutes)}\nReading ${formatHours(readingMinutes)}`;
 }
 
 // Input: none (runs each time the popup opens).
@@ -29,14 +38,21 @@ async function showDebug() {
     ["lastCheck", "trip", "lastTrip", "questions", "bannerError"],
   );
   const waitingBanners = questions.map((question) => `${question.minutesAway} min (${question.endedAt})`);
-  const debugLines = [
-    lastCheck ? describeCheck(lastCheck) : "Last check: none yet",
-    trip ? `Trip now: ${describeTrip(trip)}` : "Trip now: none (one starts after a minute on CS 61A's Ed)",
-    lastTrip ? `Last trip (${lastTrip.endedAt}): ${describeTrip(lastTrip)}, ${lastTrip.outcome}` : "Last trip: none yet",
-    `Banners waiting: ${waitingBanners.join(", ") || "none"}`,
-  ];
-  if (bannerError) debugLines.push(`Banner send failed: ${bannerError}`);
-  document.getElementById("debug").textContent = debugLines.join("\n");
+  setText("debug-last-check", lastCheck ? describeCheck(lastCheck) : "None yet");
+  setText("debug-last-check-time", lastCheck?.checkedAt ?? "");
+  setText("debug-trip-now", trip ? describeTrip(trip) : "None (one starts after a minute on CS 61A's Ed)");
+  setText("debug-last-trip", lastTrip ? `${lastTrip.outcome}: ${describeTrip(lastTrip)}` : "None yet");
+  setText("debug-last-trip-time", lastTrip?.endedAt ?? "");
+  setText("debug-banners-waiting", waitingBanners.join(", ") || "None");
+  // The error row only shows when the last send to the Ed tab failed.
+  setText("debug-send-error", bannerError ?? "");
+  document.getElementById("debug-send-error-row").hidden = !bannerError;
+}
+
+// Input: elementId, an id in popup.html; text, what to show there.
+// Output: none; replaces that element's text.
+function setText(elementId, text) {
+  document.getElementById(elementId).textContent = text;
 }
 
 // What each place from background.js's currentPlace means.
@@ -48,12 +64,12 @@ const PLACE_NAMES = {
 };
 
 // Input: lastCheck, like { place: "ed", edPageLoaded: true, checkedAt: "3:45:10 PM" }.
-// Output: text like "Last check (3:45:10 PM): CS 61A's Ed".
+// Output: where it saw you, like "CS 61A's Ed" or "CS 61A's Ed, page still loading".
 // Description: edPageLoaded is only saved for CS 61A's Ed, so it's false only
 // when that page was still loading.
 function describeCheck(lastCheck) {
   const loadingNote = lastCheck.edPageLoaded === false ? ", page still loading" : "";
-  return `Last check (${lastCheck.checkedAt}): ${PLACE_NAMES[lastCheck.place]}${loadingNote}`;
+  return `${PLACE_NAMES[lastCheck.place]}${loadingNote}`;
 }
 
 // Input: trip, like { cs61aMinutes: 1, otherEdMinutes: 0, elsewhereMinutes: 2 }.
@@ -109,7 +125,7 @@ function buildWeekText(today, minutesByDay = {}, typingMinutesByDay = {}, readin
     "",
     "Week total".padEnd(13) + formatHours(weekMinutes),
     "",
-    "Typing and reading are Ed minutes only. The total also includes cs61a.org time and counted time away from Ed.",
+    "Typing and reading are Ed minutes only. The total also includes counted time away from Ed, like short cs61a.org visits.",
     "",
   ].join("\n");
   return { weekText, weekStartKey: sunday.toLocaleDateString("en-CA"), weekMinutes };

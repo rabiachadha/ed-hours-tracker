@@ -15,6 +15,7 @@
       .total { padding: 8px 10px; border-radius: 8px; background: #f3f4f6; }
       .label { display: block; font-size: 12px; color: #6b7280; }
       .minutes { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+      .typing-reading { display: block; margin-top: 2px; font-size: 11px; color: #6b7280; white-space: pre-line; }
       .detail { margin-top: 12px; color: #6b7280; }
       button {
         width: 100%; margin-top: 12px; padding: 8px 12px;
@@ -22,21 +23,47 @@
         font: inherit; font-weight: 500; cursor: pointer;
       }
       button:hover { background: #1d4ed8; }
+      /* The debug lines: what the extension last saw, one labeled row each. */
       .debug {
-        margin-top: 12px; padding-top: 10px; border-top: 1px solid #e5e7eb;
-        font-size: 12px; color: #6b7280; white-space: pre-line;
+        margin-top: 14px; padding: 8px 12px 2px;
+        border: 1px solid #e5e7eb; border-radius: 8px;
+        font-size: 12px; line-height: 1.4;
       }
+      .debug-title {
+        font-size: 11px; font-weight: 600; letter-spacing: 0.05em;
+        text-transform: uppercase; color: #9ca3af;
+      }
+      .debug dl { margin: 4px 0 0; }
+      .debug dl > div { padding: 6px 0; border-top: 1px solid #f3f4f6; }
+      .debug dt { display: flex; justify-content: space-between; font-size: 11px; color: #6b7280; }
+      .debug dt span { font-variant-numeric: tabular-nums; }
+      .debug dd { margin: 1px 0 0; color: #111827; overflow-wrap: anywhere; }
+      /* Some values start lowercase, like "asked: ...", so capitalize the first letter. */
+      .debug dd::first-letter { text-transform: uppercase; }
+      .debug .send-error dd { color: #b91c1c; }
     </style>
   </head>
   <body>
     <div class="title">Ed Staff Hours</div>
     <div class="totals">
-      <div class="total"><span class="label">Today</span><span class="minutes" id="today-total">–</span></div>
+      <div class="total"><span class="label">Today</span><span class="minutes" id="today-total">–</span><span class="typing-reading" id="today-typing-reading"></span></div>
       <div class="total"><span class="label">This week</span><span class="minutes" id="week-total">–</span></div>
     </div>
     <div class="detail">Save this week's minutes, Sunday to Saturday, as a text file.</div>
     <button id="download-week">Download this week</button>
-    <div class="debug" id="debug"></div>
+    <!-- popup.js's showDebug fills these in. The span in a label holds that row's time. -->
+    <section class="debug">
+      <div class="debug-title">Debug</div>
+      <dl>
+        <div><dt>Last check<span id="debug-last-check-time"></span></dt><dd id="debug-last-check"></dd></div>
+        <div><dt>Trip now</dt><dd id="debug-trip-now"></dd></div>
+        <div><dt>Last trip<span id="debug-last-trip-time"></span></dt><dd id="debug-last-trip"></dd></div>
+        <div><dt>Banners waiting</dt><dd id="debug-banners-waiting"></dd></div>
+        <div class="send-error" id="debug-send-error-row" hidden>
+          <dt>Banner send failed</dt><dd id="debug-send-error"></dd>
+        </div>
+      </dl>
+    </section>
     <script src="popup.js"></script>
   </body>
 </html>

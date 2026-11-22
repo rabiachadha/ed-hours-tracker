@@ -10,7 +10,7 @@ const crypto = require("crypto");
 const backgroundSource = fs.readFileSync(process.argv[2], "utf8");
 
 // Input: none.
-// Output: { context, fakeBrowser } — a fresh copy of background.js to drive.
+// Output: { context, fakeBrowser, chrome } — a fresh copy of background.js to drive.
 // Description: fakeBrowser holds what the fake Chrome reports (where the
 // person is), records what the extension did (banners showing), and keeps the
 // listeners background.js adds to Chrome events, so tests can fire them.
@@ -24,7 +24,14 @@ function loadExtension() {
     const savedItems = {};
     return {
       savedItems,
-      get: async (key) => (key in savedItems ? { [key]: structuredClone(savedItems[key]) } : {}),
+      // Like Chrome, keys can be one key or a list of keys. Missing keys are left out.
+      get: async (keys) => {
+        const foundItems = {};
+        for (const key of [keys].flat()) {
+          if (key in savedItems) foundItems[key] = structuredClone(savedItems[key]);
+        }
+        return foundItems;
+      },
       set: async (values) => Object.assign(savedItems, structuredClone(values)),
       remove: async (key) => delete savedItems[key],
     };
@@ -40,10 +47,9 @@ function loadExtension() {
   const chrome = {
     alarms: { get: async () => undefined, create: () => {}, onAlarm: fakeChromeEvent("onAlarm") },
     runtime: {
-      onMessage: { addListener: (handleEdPageNote) => (fakeBrowser.handleEdPageNote = handleEdPageNote) },
+      onMessage: fakeChromeEvent("handleEdPageNote"),
       onInstalled: fakeChromeEvent("onInstalled"),
     },
-    // Two Ed tabs are open. Only a query for Ed pages finds them.
     scripting: { executeScript: async (injection) => fakeBrowser.scriptsAdded.push(injection) },
     storage: { session: makeStorage(), local: makeStorage() },
     idle: { queryState: async () => fakeBrowser.idleState, onStateChanged: fakeChromeEvent("onIdleStateChanged") },
@@ -56,6 +62,7 @@ function loadExtension() {
       onFocusChanged: fakeChromeEvent("onWindowFocusChanged"),
     },
     tabs: {
+      // Two Ed tabs are open. Only a query for Ed pages finds them.
       query: async (queryInfo) => (queryInfo.url === "https://*.edstem.org/*" ? [{ id: 7 }, { id: 8 }] : []),
       sendMessage: async (tabId, bannerNote) => {
         // Like real Chrome: while the page loads, ed-banner.js isn't running yet, so the message fails.
@@ -71,14 +78,15 @@ function loadExtension() {
       setTitle: (hoverText) => (fakeBrowser.hoverText = hoverText.title),
     },
   };
-  const context = vm.createContext({ chrome, URL, structuredClone, crypto });
+  const context = vm.createContext({ chrome, URL, crypto });
   vm.runInContext(backgroundSource, context);
   return { context, fakeBrowser, chrome };
 }
 
 // Input: steps like [["ed", 5], ["elsewhere", 3]]; minuteSituation can also be "idle",
 // "unfocused", "nowindows", or "typing" (on Ed and typed that minute).
-// Output: { getTodayMinutes, minutesShowing, clickBannerButton, getLastTrip, getLastCheck } after running every minute.
+// Output: { getTodayMinutes, minutesShowing, clickBannerButton, getLastTrip, getLastCheck, fakeBrowser }
+// after running every minute.
 async function simulate(steps) {
   const { context, fakeBrowser, chrome } = loadExtension();
   for (const [minuteSituation, minutes] of steps) {
@@ -220,6 +228,7 @@ const tests = {
     assert.equal(simulationResult.getTodayMinutes(), 8);
     assert.equal(simulationResult.getTodayMinutes("typingMinutesByDay"), 3);
     assert.equal(simulationResult.getTodayMinutes("readingMinutesByDay"), 3);
+    assert.match(simulationResult.fakeBrowser.hoverText, /\(typing 3 min, reading 3 min\)$/);
   },
   "Typing while the banner waits doesn't lose the held minutes": async () => {
     const simulationResult = await simulate([["ed", 1], ["elsewhere", 5], ["ed", 1], ["typing", 1]]);

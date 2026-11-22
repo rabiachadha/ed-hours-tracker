@@ -55,12 +55,15 @@ const BANNER_CSS = `
   .no { background: #f3f4f6; color: #374151; }
   .no:hover { background: #e5e7eb; }
 `;
+const BANNER_HOST_ID = "ed-hours-banners"; // The id of the box on Ed's page that holds the banners
 
 // Input: questions, every unanswered question, like [{ id, minutesAway, endedAt }].
 // Output: none; shows one banner per question, stacked in the bottom right, newest at the bottom.
 // Description: Banners already showing stay put, so they don't slide in again.
 // Banners for questions answered in another tab are removed.
 function showBanners(questions) {
+  // Nothing to show and no banners yet: don't add an empty box to Ed's page.
+  if (questions.length === 0 && !document.getElementById(BANNER_HOST_ID)) return;
   const stack = getBannerStack();
   const questionIds = questions.map((question) => question.id);
   for (const card of stack.querySelectorAll(".card")) {
@@ -76,10 +79,10 @@ function showBanners(questions) {
 // Description: Makes it the first time, inside a shadow root (see BANNER_CSS).
 // Makes it again if Ed's page code ever removes it.
 function getBannerStack() {
-  let bannerHost = document.getElementById("ed-hours-banners");
+  let bannerHost = document.getElementById(BANNER_HOST_ID);
   if (!bannerHost) {
     bannerHost = document.createElement("div");
-    bannerHost.id = "ed-hours-banners";
+    bannerHost.id = BANNER_HOST_ID;
     bannerHost.attachShadow({ mode: "open" }).innerHTML = `<style>${BANNER_CSS}</style><div class="stack"></div>`;
     document.body.append(bannerHost);
   }

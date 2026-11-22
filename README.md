@@ -1,6 +1,6 @@
 # Ed Staff Hours
 
-A Chrome extension that counts the minutes CS 61A staff spend working on CS 61A's Ed course and cs61a.org. Today's total shows on the extension's toolbar icon, and clicking the icon lets you download the week as a text file.
+A Chrome extension that counts the minutes CS 61A staff spend working on CS 61A's Ed course. Today's total shows on the extension's toolbar icon, and clicking the icon lets you download the week as a text file.
 
 - [Using it](#using-it): for staff who install it
 - [Working on it](#working-on-it): for anyone changing the code
@@ -45,8 +45,8 @@ A Chrome extension that counts the minutes CS 61A staff spend working on CS 61A'
 - **Badge:** the small text on the extension's icon, like `1:23`, is today's total in hours and minutes. Hover over the icon to see the typing and reading split.
 - The badge updates every minute, so it shows `0:00` once a new day starts, even before you open Ed.
 - **Banners:** white boxes in the bottom right of CS 61A's Ed pages, each asking whether one time away was Ed work, like "away for 3 minutes, until 3:42 PM". A new one slides in as soon as you're back on Ed and the page has loaded. They stack, newest at the bottom, and stay on whichever CS 61A Ed page you're looking at, even after a reload, until you click Yes or No. Answering in one tab removes that banner from the others.
-- **Popup:** click the extension's icon to see today's total and this week's total (Sunday to Saturday).
-- **Debug lines:** the gray text at the bottom of the popup shows where the last check saw you (CS 61A's Ed, another Ed page, cs61a.org, or elsewhere), the current trip, the last trip with what happened to it (asked, counted without asking, or dropped), the banners waiting for an answer, and the error if sending them to the Ed tab failed. Close and reopen the popup to refresh them.
+- **Popup:** click the extension's icon to see today's total and this week's total (Sunday to Saturday). Under today's total is today's typing and reading time on Ed.
+- **Debug lines:** the Debug box at the bottom of the popup shows where the last check saw you (CS 61A's Ed, another Ed page, cs61a.org, or elsewhere), the current trip, the last trip with what happened to it (asked, counted without asking, or dropped), the banners waiting for an answer, and the error if sending them to the Ed tab failed (in red, only when it happens). Close and reopen the popup to refresh them. They're kept for now while staff try the extension.
 - **Weekly file:** in the popup, click **Download this week**. It saves a file like `ed-hours-week-of-2026-11-15.txt` to Downloads, with each day from Sunday to Saturday, the typing and reading split, and the week total.
 
 ### Good to know
@@ -69,7 +69,8 @@ There's no build step: Chrome runs these files exactly as written.
 | `manifest.json` | Chrome's settings file: name, permissions, and which scripts run where |
 | `background.js` | The service worker. Once a minute it works out where you are and counts minutes. It also ends your time away as soon as you're back on Ed. All the counting rules live here. |
 | `ed-banner.js` | Content script that runs on every Ed page. Shows the banners (`showBanners`, `makeBanner`) and reports typing. |
-| `popup.html`, `popup.js` | The popup that opens when you click the icon. `showTotals` fills in today's and this week's totals. `buildWeekText` makes the week's text, and a link with a `download` attribute saves it, so no extra permission is needed. |
+| `popup.html`, `popup.js` | The popup that opens when you click the icon. `showTotals` fills in today's and this week's totals, plus today's typing and reading time. `buildWeekText` makes the week's text, and a link with a `download` attribute saves it, so no extra permission is needed. |
+| `icons/` | The extension's icon. `icon.svg` is the drawing; the PNGs (16, 32, 48, 128 px) are exported from it, since Chrome can't use SVG icons. |
 | `test-background.js` | Node tests. Runs `background.js` with a fake `chrome` object. Chrome never loads it. |
 | `test-popup.js` | Node tests for the popup's totals and the weekly file's text. Chrome never loads it. |
 | `BUGS.md` | Known bugs, kept as a history |
@@ -79,7 +80,7 @@ There's no build step: Chrome runs these files exactly as written.
 - A Chrome alarm runs `checkMinute` once a minute. It calls `currentPlace`, which returns `"ed"` (CS 61A's Ed course, checked by `isCs61aCourse`), `"otherEd"`, `"cs61a"`, or `"elsewhere"`.
 - **On Ed:** settle the current trip with `endTrip`, add the minute (as typing or reading), and start a fresh, empty trip.
 - **Away:** add the minute to the trip, as a cs61a, other Ed, or elsewhere minute. If there's no trip yet (not on Ed since Chrome started), nothing counts.
-- **Back on Ed, between checks:** switching tabs, windows, or pages, or coming back from idle, runs `checkReturnToEd`. If you're now on CS 61A's Ed, it settles the trip with `endTrip` right away, then `showBanners` sends the unanswered questions to the tab, so banners don't wait for the next minute. Banners are only sent once the page has loaded, because `ed-banner.js` isn't running before then (bug #3). It adds no Ed minute; `checkMinute` still does that.
+- **Back on Ed, between checks:** switching tabs, windows, or pages, or coming back from idle, runs `checkReturnToEd`. If you're now on CS 61A's Ed, it settles the trip with `endTrip` right away, then `showBanners` sends the unanswered questions to the tab, so banners don't wait for the next minute. Both checks do these steps through `endTripAndShowBanners`. Banners are only sent once the page has loaded, because `ed-banner.js` isn't running before then (bug #3). It adds no Ed minute; `checkMinute` still does that.
 - **Install or reload:** `addBannerScriptToOpenEdTabs` adds `ed-banner.js` to every open Ed tab. Chrome only adds it when a page loads, and reloading the extension cuts off the copies already in open tabs.
 - `runOneAtATime` makes `checkMinute` and `checkReturnToEd` take turns. One page load fires several events at once, and two checks running together could end the same trip twice.
 - `endTrip` applies the rules in [What counts](#what-counts). To ask, it adds a question, `{ id, minutesAway, endedAt }`, to the `questions` list in storage.
@@ -128,8 +129,9 @@ node test-popup.js popup.js
 ```
 
 - Needs Node 18 or newer. It uses only Node's built-in modules, so there's nothing to install.
-- Each background test plays out pretend minutes (on Ed, elsewhere, idle, and so on) and checks the totals and banners. Some also fire Chrome events, like switching tabs, to check the banner shows right away. All 40 pass as of 2026-11-21.
-- The popup tests check the popup's totals and the weekly file's text, including weeks that cross months and years. All 8 pass as of 2026-11-21.
+- Each background test plays out pretend minutes (on Ed, elsewhere, idle, and so on) and checks the totals and banners. Some also fire Chrome events, like switching tabs, to check the banner shows right away.
+- The popup tests check the popup's totals and the weekly file's text, including weeks that cross months and years.
+- Each file ends with "All passed" or how many failed.
 - When you fix a bug or change a rule, add or update a test first.
 
 ### Test in Chrome

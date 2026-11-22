@@ -14,11 +14,12 @@ const savedTotals = { minutesByDay: {} };
 const savedTripInfo = {}; // What background.js keeps in chrome.storage.session
 const fakeChrome = {
   storage: {
-    local: { get: async (key) => ({ [key]: structuredClone(savedTotals[key]) }) },
+    // Like Chrome, keys can be one key or a list of keys.
+    local: { get: async (keys) => Object.fromEntries([keys].flat().map((key) => [key, structuredClone(savedTotals[key])])) },
     session: { get: async () => structuredClone(savedTripInfo) },
   },
 };
-const context = vm.createContext({ document: fakeDocument, chrome: fakeChrome, structuredClone });
+const context = vm.createContext({ document: fakeDocument, chrome: fakeChrome });
 vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), context);
 
 // Input: daysAgo, how many days before today.
@@ -26,6 +27,12 @@ vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), context);
 function dateKeyDaysAgo(daysAgo) {
   const today = new Date();
   return new Date(today.getFullYear(), today.getMonth(), today.getDate() - daysAgo).toLocaleDateString("en-CA");
+}
+
+// Input: elementId, a debug row's id in popup.html, like "debug-trip-now".
+// Output: the text popup.js put there.
+function debugText(elementId) {
+  return fakeElements[elementId].textContent;
 }
 
 const tests = {
@@ -52,7 +59,7 @@ const tests = {
         "",
         "Week total   4h 15m",
         "",
-        "Typing and reading are Ed minutes only. The total also includes cs61a.org time and counted time away from Ed.",
+        "Typing and reading are Ed minutes only. The total also includes counted time away from Ed, like short cs61a.org visits.",
         "",
       ].join("\n"),
     );
@@ -78,22 +85,26 @@ const tests = {
     assert.equal(fakeElements["today-total"].textContent, "1h 23m");
     assert.equal(fakeElements["week-total"].textContent, "1h 23m");
   },
+  "Popup shows today's typing and reading time under the Today total": async () => {
+    savedTotals.typingMinutesByDay = { [dateKeyDaysAgo(0)]: 40, [dateKeyDaysAgo(1)]: 999 };
+    savedTotals.readingMinutesByDay = { [dateKeyDaysAgo(0)]: 125 };
+    await context.showTotals();
+    assert.equal(fakeElements["today-typing-reading"].textContent, "Typing 0h 40m\nReading 2h 05m");
+  },
   "Debug lines before any trip": async () => {
     await context.showDebug();
-    assert.equal(
-      fakeElements.debug.textContent,
-      [
-        "Last check: none yet",
-        "Trip now: none (one starts after a minute on CS 61A's Ed)",
-        "Last trip: none yet",
-        "Banners waiting: none",
-      ].join("\n"),
-    );
+    assert.equal(debugText("debug-last-check"), "None yet");
+    assert.equal(debugText("debug-last-check-time"), "");
+    assert.equal(debugText("debug-trip-now"), "None (one starts after a minute on CS 61A's Ed)");
+    assert.equal(debugText("debug-last-trip"), "None yet");
+    assert.equal(debugText("debug-banners-waiting"), "None");
+    assert.equal(fakeElements["debug-send-error-row"].hidden, true);
   },
   "Debug lines say when CS 61A's Ed page was still loading": async () => {
     savedTripInfo.lastCheck = { place: "ed", edPageLoaded: false, checkedAt: "3:46:02 PM" };
     await context.showDebug();
-    assert.match(fakeElements.debug.textContent, /^Last check \(3:46:02 PM\): CS 61A's Ed, page still loading\n/);
+    assert.equal(debugText("debug-last-check"), "CS 61A's Ed, page still loading");
+    assert.equal(debugText("debug-last-check-time"), "3:46:02 PM");
   },
   "Debug lines show the trip now, the last trip, the waiting banners, and a send error": async () => {
     Object.assign(savedTripInfo, {
@@ -107,16 +118,14 @@ const tests = {
       bannerError: "Could not establish connection. Receiving end does not exist.",
     });
     await context.showDebug();
-    assert.equal(
-      fakeElements.debug.textContent,
-      [
-        "Last check (3:45:10 PM): another Ed page, not CS 61A's course",
-        "Trip now: 2 min elsewhere, 1 cs61a.org, 0 other Ed",
-        "Last trip (3:42 PM): 6 min elsewhere, 0 cs61a.org, 0 other Ed, asked",
-        "Banners waiting: 3 min (3:30 PM), 6 min (3:42 PM)",
-        "Banner send failed: Could not establish connection. Receiving end does not exist.",
-      ].join("\n"),
-    );
+    assert.equal(debugText("debug-last-check"), "another Ed page, not CS 61A's course");
+    assert.equal(debugText("debug-last-check-time"), "3:45:10 PM");
+    assert.equal(debugText("debug-trip-now"), "2 min elsewhere, 1 cs61a.org, 0 other Ed");
+    assert.equal(debugText("debug-last-trip"), "asked: 6 min elsewhere, 0 cs61a.org, 0 other Ed");
+    assert.equal(debugText("debug-last-trip-time"), "3:42 PM");
+    assert.equal(debugText("debug-banners-waiting"), "3 min (3:30 PM), 6 min (3:42 PM)");
+    assert.equal(debugText("debug-send-error"), "Could not establish connection. Receiving end does not exist.");
+    assert.equal(fakeElements["debug-send-error-row"].hidden, false);
   },
 };
 
