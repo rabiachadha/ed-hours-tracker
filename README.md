@@ -30,6 +30,7 @@ A Chrome extension that counts the minutes CS 61A staff spend working on CS 61A'
 - It can only see Ed and cs61a.org. Chrome hides the address of every other site from it, so all other sites look the same: "elsewhere".
 - It never reads what you type, which keys you press, or what's on the page. For typing minutes, it only notes that a key was pressed in a text box on Ed.
 - Everything stays in Chrome on your computer. Nothing is uploaded.
+- The full privacy policy is in [PRIVACY.md](PRIVACY.md).
 - Chrome permissions it uses: `idle` (was the keyboard or mouse used lately), `alarms` (run once a minute), `storage` (save totals), `scripting` (put the banner script back into open Ed tabs after an install or update), plus access to edstem.org and cs61a.org. `scripting` can only reach those two sites.
 
 ### Install
@@ -74,6 +75,7 @@ There's no build step: Chrome runs these files exactly as written.
 | `test-background.js` | Node tests. Runs `background.js` with a fake `chrome` object. Chrome never loads it. |
 | `test-popup.js` | Node tests for the popup's totals and the weekly file's text. Chrome never loads it. |
 | `BUGS.md` | Known bugs, kept as a history |
+| `PRIVACY.md` | The privacy policy linked from the Chrome Web Store listing. Update it before releasing any version that sends data off the computer. |
 
 ### How it works
 
