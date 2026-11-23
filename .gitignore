@@ -1,0 +1,4 @@
+# Chrome Web Store uploads: the zip is built from the code, and the
+# screenshot is for the store listing. Neither belongs in the repo.
+*.zip
+ed-staff-hours-screenshot-*.png
